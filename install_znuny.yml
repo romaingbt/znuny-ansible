@@ -1,0 +1,163 @@
+---
+- name: Installer Znuny en local avec configuration de la base de données
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    znuny_version: "7.3.7"
+    db_name: "znuny"
+    db_user: "znuny_user"
+    db_password: "SuperMDP" # Change le mot de passe ici
+
+  tasks:
+    - name: Mettre à jour le cache APT
+      apt:
+        update_cache: yes
+
+    - name: Installer les dépendances système et MariaDB
+      apt:
+        name:
+          - apache2
+          - mariadb-client
+          - mariadb-server
+          - python3-pymysql 
+          - tar
+          - bash-completion
+        state: present
+
+    - name: Installer les modules Perl requis pour Znuny
+      apt:
+        name:
+          - libapache2-mod-perl2
+          - libdbd-mysql-perl
+          - libtimedate-perl
+          - libnet-dns-perl
+          - libnet-ldap-perl
+          - libio-socket-ssl-perl
+          - libpdf-api2-perl
+          - libsoap-lite-perl
+          - libtext-csv-xs-perl
+          - libjson-xs-perl
+          - libapache-dbi-perl
+          - libxml-libxml-perl
+          - libxml-libxslt-perl
+          - libyaml-perl
+          - libarchive-zip-perl
+          - libcrypt-eksblowfish-perl
+          - libencode-hanextra-perl
+          - libmail-imapclient-perl
+          - libtemplate-perl
+          - libdatetime-perl
+          - libmoo-perl
+          - libyaml-libyaml-perl
+          - libjavascript-minifier-xs-perl
+          - libcss-minifier-xs-perl
+          - libauthen-sasl-perl
+          - libauthen-ntlm-perl
+          - libhash-merge-perl
+          - libical-parser-perl
+          - libspreadsheet-xlsx-perl
+          - libdata-uuid-perl
+        state: present
+
+    - name: Configurer MariaDB pour Znuny (taille des paquets et InnoDB)
+      copy:
+        dest: /etc/mysql/mariadb.conf.d/50-znuny_config.cnf
+        content: |
+          [mysql]
+          max_allowed_packet=256M
+
+          [mysqldump]
+          max_allowed_packet=256M
+
+          [mysqld]
+          innodb_log_file_size = 256M
+          max_allowed_packet=256M
+      notify: Redémarrer MariaDB
+
+    - name: S'assurer que MariaDB est démarré et activé
+      service:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Créer la base de données Znuny
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Créer l'utilisateur MariaDB pour Znuny et lui donner les droits
+      mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Créer l'utilisateur système znuny
+      user:
+        name: znuny
+        home: /opt/znuny
+        group: www-data
+        shell: /bin/bash
+        create_home: no
+        system: yes
+
+    - name: Télécharger l'archive source de Znuny
+      get_url:
+        url: "https://download.znuny.org/releases/znuny-{{ znuny_version }}.tar.gz"
+        dest: "/opt/znuny-{{ znuny_version }}.tar.gz"
+
+    - name: Extraire l'archive Znuny dans /opt
+      unarchive:
+        src: "/opt/znuny-{{ znuny_version }}.tar.gz"
+        dest: /opt/
+        remote_src: yes
+        creates: "/opt/znuny-{{ znuny_version }}"
+
+    - name: Créer le lien symbolique /opt/znuny
+      file:
+        src: "/opt/znuny-{{ znuny_version }}"
+        dest: /opt/znuny
+        state: link
+
+    - name: Copier le fichier de configuration par défaut Config.pm
+      copy:
+        src: /opt/znuny/Kernel/Config.pm.dist
+        dest: /opt/znuny/Kernel/Config.pm
+        remote_src: yes
+        force: no
+
+    - name: Appliquer les permissions initiales
+      command: /opt/znuny/bin/znuny.SetPermissions.pl
+
+    - name: Configurer Apache (modules et liaison conf)
+      file:
+        src: /opt/znuny/scripts/apache2-httpd.include.conf
+        dest: /etc/apache2/conf-available/znuny.conf
+        state: link
+
+    - name: Activer les modules Apache nécessaires et la conf Znuny
+      shell: |
+        a2dismod mpm_event
+        a2enmod mpm_prefork headers filter perl
+        a2enconf znuny
+      notify: Redémarrer Apache
+
+    - name: S'assurer qu'Apache est démarré et activé
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Redémarrer MariaDB
+      service:
+        name: mariadb
+        state: restarted
+
+    - name: Redémarrer Apache
+      service:
+        name: apache2
+        state: restarted
